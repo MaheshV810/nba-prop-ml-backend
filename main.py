@@ -728,8 +728,142 @@ def player_gamelog(player_name: str, season: str = Query(None)):
 
 _leaders_cache: dict = {}
 
+# Known top NBA players by BDL ID — covers all realistic leaders
+TOP_PLAYER_IDS = [
+    175,   # Shai Gilgeous-Alexander
+    115,   # Stephen Curry
+    1629029, # Luka Doncic
+    246,   # Nikola Jokic
+    1630162, # Anthony Edwards
+    1628983, # (duplicate SGA - skip)
+    203999,  # Nikola Jokic alt
+    1627759, # Jaylen Brown
+    1628378, # Donovan Mitchell
+    1628973, # Jalen Brunson
+    1630178, # Tyrese Maxey
+    202695,  # Kawhi Leonard
+    1627750, # Jamal Murray
+    1641705, # Victor Wembanyama
+    1630166, # Deni Avdija
+    1627783, # Pascal Siakam
+    201142,  # Kevin Durant
+    1626164, # Devin Booker
+    1629627, # Ja Morant
+    1629028, # Zion Williamson
+    203507,  # Giannis Antetokounmpo
+    2544,    # LeBron James
+    201935,  # James Harden
+    1628384, # Bam Adebayo
+    1629630, # Jaren Jackson Jr
+    1629636, # Darius Garland
+    1629029, # Luka alt
+    1630596, # Evan Mobley
+    1630224, # Josh Giddey
+    1630169, # Franz Wagner
+    1629628, # Jordan Poole
+    1630542, # Scottie Barnes
+    1629311, # Trae Young
+    1629029, # skip
+    203081,  # Damian Lillard
+    1628389, # De'Aaron Fox
+    1629021, # Saddiq Bey
+    1641706, # Cooper Flagg (2025 draft)
+    1642844, # Dylan Harper
+    1630191, # Alperen Sengun
+    1630563, # Cade Cunningham
+    1630559, # Jalen Green
+    203076,  # Anthony Davis
+    1629029, # skip
+    203944,  # Julius Randle
+    1627826, # Zach LaVine
+    203468,  # Victor Oladipo
+    1629057, # Luguentz Dort
+    1630532, # Desmond Bane
+    1629029, # skip
+]
+# Deduplicate
+TOP_PLAYER_IDS = list(dict.fromkeys(TOP_PLAYER_IDS))
+
+
 @app.get("/league/leaders")
 def league_leaders(
+    season: str = Query(None),
+    stat_category: str = Query("PTS"),
+    top: int = Query(10, ge=1, le=25),
+):
+    if not season:
+        season = current_season_str()
+    season_int = season_str_to_int(season)
+
+    cache_key = f"leaders_{season}_{datetime.now().strftime('%Y%m%d')}"
+
+    STAT_MAP = {
+        "PTS": "PTS", "REB": "REB", "AST": "AST", "STL": "STL", "BLK": "BLK",
+        "FG_PCT": "FG_PCT", "FG3_PCT": "FG3_PCT", "FT_PCT": "FT_PCT",
+    }
+    stat_key = STAT_MAP.get(stat_category, "PTS")
+
+    if cache_key not in _leaders_cache:
+        # Fetch stats for all top players — one BDL call per player
+        import time
+        player_data = {}
+        for pid in TOP_PLAYER_IDS:
+            try:
+                games = get_gamelog(pid, season_int)
+                if len(games) < 10:
+                    continue
+                avgs = calc_avgs(games)
+                # Get player name from first game's raw data
+                url = f"{BDL_BASE}/players/{pid}"
+                pr = requests.get(url, headers=BDL_HEADERS, timeout=10)
+                if pr.ok:
+                    pinfo = pr.json().get("data", {})
+                    team = pinfo.get("team") or {}
+                    player_data[pid] = {
+                        "name": f"{pinfo.get('first_name','')} {pinfo.get('last_name','')}",
+                        "team": team.get("abbreviation","") if isinstance(team, dict) else "",
+                        "avgs": avgs,
+                    }
+                time.sleep(0.5)  # stay under 60 req/min
+            except Exception:
+                continue
+        _leaders_cache[cache_key] = player_data
+
+    player_data = _leaders_cache[cache_key]
+
+    if not player_data:
+        raise HTTPException(status_code=503, detail="Could not fetch leaders data. Try again in a moment.")
+
+    leaders_list = []
+    for pid, pdata in player_data.items():
+        avgs = pdata["avgs"]
+        val = avgs.get(stat_key, 0)
+        if not val:
+            continue
+        leaders_list.append({
+            "PLAYER_ID": pid,
+            "PLAYER": pdata["name"],
+            "TEAM": pdata["team"],
+            "GP": avgs.get("GP", 0),
+            "MIN": avgs.get("MIN", 0),
+            "PTS": avgs.get("PTS", 0),
+            "REB": avgs.get("REB", 0),
+            "AST": avgs.get("AST", 0),
+            "STL": avgs.get("STL", 0),
+            "BLK": avgs.get("BLK", 0),
+            "FG_PCT": avgs.get("FG_PCT", 0),
+            "FG3_PCT": avgs.get("FG3_PCT", 0),
+            "FT_PCT": avgs.get("FT_PCT", 0),
+            "TOV": avgs.get("TOV", 0),
+            "_sort_val": val,
+        })
+
+    leaders_list.sort(key=lambda x: x["_sort_val"], reverse=True)
+    for i, row in enumerate(leaders_list[:top]):
+        row["RANK"] = i + 1
+        del row["_sort_val"]
+
+    return {"leaders": leaders_list[:top]}
     season: str = Query(None),
     stat_category: str = Query("PTS"),
     top: int = Query(15, ge=1, le=50),
@@ -752,11 +886,15 @@ def league_leaders(
         # Fetch all stats for the season — only do this once per day
         all_stats_raw = []
         cursor = None
+        page = 0
         while True:
             url = f"{BDL_BASE}/stats?seasons[]={season_int}&postseason=false&per_page=100"
             if cursor:
                 url += f"&cursor={cursor}"
             r = requests.get(url, headers=BDL_HEADERS, timeout=20)
+            if r.status_code == 429:
+                # Rate limited — return what we have so far
+                break
             if not r.ok:
                 break
             data = r.json()
@@ -764,8 +902,11 @@ def league_leaders(
                 if parse_minutes(row.get("min", "0")) >= 1:
                     all_stats_raw.append(row)
             cursor = data.get("meta", {}).get("next_cursor")
-            if not cursor or len(all_stats_raw) > 50000:
+            page += 1
+            if not cursor or len(all_stats_raw) > 30000:
                 break
+            if page % 5 == 0:
+                import time; time.sleep(1)  # pause every 5 pages to avoid rate limit
 
         # Aggregate by player
         player_stats: dict = {}
