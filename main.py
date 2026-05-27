@@ -479,11 +479,14 @@ def search_player(name: str = Query(...)):
 def player_info(player_name: str):
     from nba_api.stats.endpoints import playercareerstats
     p = get_player(player_name)
-    time.sleep(0.6)
-    career = playercareerstats.PlayerCareerStats(player_id=p["id"], per_mode36="PerGame")
-    data = career.get_normalized_dict()
-    seasons = data.get("SeasonTotalsRegularSeason", [])
-    latest = enrich(seasons[-1]) if seasons else {}
+    try:
+        time.sleep(0.6)
+        career = playercareerstats.PlayerCareerStats(player_id=p["id"], per_mode36="PerGame")
+        data = career.get_normalized_dict()
+        seasons = data.get("SeasonTotalsRegularSeason", [])
+        latest = enrich(seasons[-1]) if seasons else {}
+    except Exception:
+        latest = {}
     return {
         "common_player_info": {
             "DISPLAY_FIRST_LAST": p["full_name"],
