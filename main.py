@@ -726,6 +726,8 @@ def player_gamelog(player_name: str, season: str = Query(None)):
         raise HTTPException(status_code=404, detail=f"No games found for {season}.")
     return {"game_log": list(reversed(games))}
 
+_leaders_cache: dict = {}
+
 @app.get("/league/leaders")
 def league_leaders(
     season: str = Query(None),
@@ -736,64 +738,51 @@ def league_leaders(
         season = current_season_str()
     season_int = season_str_to_int(season)
 
+    # Cache all stats for the season once per day — reuse across all stat categories
+    cache_key = f"leaders_{season}_{datetime.now().strftime('%Y%m%d')}"
+
     STAT_MAP = {
         "PTS": "PTS", "REB": "REB", "AST": "AST", "STL": "STL", "BLK": "BLK",
         "FG_PCT": "FG_PCT", "FG3_PCT": "FG3_PCT", "FT_PCT": "FT_PCT",
     }
     stat_key = STAT_MAP.get(stat_category, "PTS")
-    min_gp = 20  # minimum games played to qualify
+    min_gp = 20
 
-    # Fetch all active players
-    all_players = []
-    cursor = None
-    while True:
-        params = {"per_page": 100}
-        if cursor:
-            params["cursor"] = cursor
-        data = bdl_get("/players/active", params)
-        all_players.extend(data.get("data", []))
-        cursor = data.get("meta", {}).get("next_cursor")
-        if not cursor:
-            break
+    if cache_key not in _leaders_cache:
+        # Fetch all stats for the season — only do this once per day
+        all_stats_raw = []
+        cursor = None
+        while True:
+            url = f"{BDL_BASE}/stats?seasons[]={season_int}&postseason=false&per_page=100"
+            if cursor:
+                url += f"&cursor={cursor}"
+            r = requests.get(url, headers=BDL_HEADERS, timeout=20)
+            if not r.ok:
+                break
+            data = r.json()
+            for row in data.get("data", []):
+                if parse_minutes(row.get("min", "0")) >= 1:
+                    all_stats_raw.append(row)
+            cursor = data.get("meta", {}).get("next_cursor")
+            if not cursor or len(all_stats_raw) > 50000:
+                break
 
-    # For each player fetch their season stats
-    # This is expensive — we batch by fetching all stats for the season
-    # and aggregate by player
-    all_stats_raw = []
-    cursor = None
-    while True:
-        url = f"{BDL_BASE}/stats?seasons[]={season_int}&postseason=false&per_page=100"
-        if cursor:
-            url += f"&cursor={cursor}"
-        r = requests.get(url, headers=BDL_HEADERS, timeout=20)
-        if not r.ok:
-            break
-        data = r.json()
-        rows = data.get("data", [])
-        # Only include rows where player actually played
-        for row in rows:
-            if parse_minutes(row.get("min","0")) >= 1:
-                all_stats_raw.append(row)
-        cursor = data.get("meta", {}).get("next_cursor")
-        if not cursor or len(all_stats_raw) > 50000:
-            break
+        # Aggregate by player
+        player_stats: dict = {}
+        for row in all_stats_raw:
+            player = row.get("player", {})
+            pid = player.get("id")
+            if not pid:
+                continue
+            if pid not in player_stats:
+                player_stats[pid] = {"player": player, "team": row.get("team", {}), "games": []}
+            player_stats[pid]["games"].append(normalize_row(row))
 
-    # Aggregate by player
-    player_stats: dict = {}
-    for row in all_stats_raw:
-        player = row.get("player", {})
-        pid = player.get("id")
-        if not pid:
-            continue
-        if pid not in player_stats:
-            player_stats[pid] = {
-                "player": player,
-                "team": row.get("team", {}),
-                "games": [],
-            }
-        player_stats[pid]["games"].append(normalize_row(row))
+        _leaders_cache[cache_key] = player_stats
 
-    # Calculate averages and rank
+    player_stats = _leaders_cache[cache_key]
+
+    # Calculate averages and rank for requested stat
     leaders_list = []
     for pid, pdata in player_stats.items():
         games = pdata["games"]
@@ -801,14 +790,14 @@ def league_leaders(
             continue
         avgs = calc_avgs(games)
         val = avgs.get(stat_key, 0)
-        if val is None or val == 0:
+        if not val:
             continue
         player = pdata["player"]
         team = pdata["team"]
         leaders_list.append({
             "PLAYER_ID": pid,
             "PLAYER": f"{player.get('first_name','')} {player.get('last_name','')}",
-            "TEAM": team.get("abbreviation", "") if isinstance(team, dict) else "",
+            "TEAM": team.get("abbreviation","") if isinstance(team, dict) else "",
             "GP": avgs.get("GP", 0),
             "MIN": avgs.get("MIN", 0),
             "PTS": avgs.get("PTS", 0),
