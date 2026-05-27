@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore")
 
 load_dotenv()
 
-ODDS_KEY  = os.getenv("ODDS_API_KEY", "e6a265e1b7c05037484ff86584944259")
+ODDS_KEY  = os.getenv("ODDS_API_KEY", "")
 ODDS_BASE = "https://api.the-odds-api.com/v4"
 
 app = FastAPI(title="NBA Stats + ML Predictions", version="4.0.0")
