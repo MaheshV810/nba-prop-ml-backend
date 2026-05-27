@@ -15,7 +15,26 @@ warnings.filterwarnings("ignore")
 
 load_dotenv()
 
-ODDS_KEY  = os.getenv("ODDS_API_KEY", "")
+# ── Patch nba_api to use browser headers (required on cloud/datacenter IPs) ──
+try:
+    from nba_api.library import http as nba_http
+    nba_http.HEADERS = {
+        "Host": "stats.nba.com",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "x-nba-stats-origin": "stats",
+        "x-nba-stats-token": "true",
+        "Referer": "https://www.nba.com/",
+        "Connection": "keep-alive",
+        "Origin": "https://www.nba.com",
+    }
+    nba_http.TIMEOUT = 60
+except Exception:
+    pass
+
+ODDS_KEY  = os.getenv("ODDS_API_KEY", "44adfb9534b54975e4ff98b9bf8f503a")
 ODDS_BASE = "https://api.the-odds-api.com/v4"
 
 app = FastAPI(title="NBA Stats + ML Predictions", version="4.0.0")
