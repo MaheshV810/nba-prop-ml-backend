@@ -15,10 +15,12 @@ warnings.filterwarnings("ignore")
 
 load_dotenv()
 
-# ── Patch nba_api to use browser headers (required on cloud/datacenter IPs) ──
+# ── Patch nba_api http.py to use browser headers + longer timeout ─────────────
 try:
-    from nba_api.library import http as nba_http
-    nba_http.HEADERS = {
+    import nba_api.library.http as nba_http
+    import inspect, re
+
+    BROWSER_HEADERS = {
         "Host": "stats.nba.com",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -29,10 +31,41 @@ try:
         "Referer": "https://www.nba.com/",
         "Connection": "keep-alive",
         "Origin": "https://www.nba.com",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
-    nba_http.TIMEOUT = 60
-except Exception:
-    pass
+
+    # Patch the class-level headers and timeout
+    nba_http.NBAStatsHTTP.HEADERS = BROWSER_HEADERS
+    nba_http.NBAStatsHTTP.TIMEOUT = 60
+
+    # Also patch the module-level send function if it exists
+    if hasattr(nba_http, 'HEADERS'):
+        nba_http.HEADERS = BROWSER_HEADERS
+    if hasattr(nba_http, 'TIMEOUT'):
+        nba_http.TIMEOUT = 60
+
+    # Monkey-patch the actual file on disk so nba_api uses our headers
+    import nba_api
+    import os
+    http_path = os.path.join(os.path.dirname(nba_api.__file__), 'library', 'http.py')
+    with open(http_path, 'r') as f:
+        src = f.read()
+
+    # Replace timeout value
+    src = re.sub(r'timeout\s*=\s*\d+', 'timeout=60', src)
+
+    # Replace headers dict if present
+    if 'x-nba-stats-token' not in src:
+        src = src.replace(
+            "'User-Agent':",
+            "'x-nba-stats-origin': 'stats', 'x-nba-stats-token': 'true', 'Referer': 'https://www.nba.com/', 'Origin': 'https://www.nba.com/', 'User-Agent':"
+        )
+
+    with open(http_path, 'w') as f:
+        f.write(src)
+except Exception as e:
+    print(f"nba_api patch warning: {e}")
 
 ODDS_KEY  = os.getenv("ODDS_API_KEY", "44adfb9534b54975e4ff98b9bf8f503a")
 ODDS_BASE = "https://api.the-odds-api.com/v4"
